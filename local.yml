@@ -1,0 +1,55 @@
+---
+- hosts: localhost
+  become: yes
+
+  vars:
+    url_prefix: http://169.254.169.254/latest/meta-data/
+
+  tasks:
+    - name: install iptables-persistent
+      apt:
+        pkg: iptables-persistent
+        state: present
+
+    - pip:
+        name: netaddr
+
+    - name: set kernel parameter net.ipv4.ip_forward to 1
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: 1
+        sysctl_set: yes
+        state: present
+        reload: yes
+
+    - name: get VPC cidr block
+      uri:
+        url: "{{ url_prefix }}network/interfaces/macs/{{ ansible_default_ipv4.macaddress }}/vpc-ipv4-cidr-block"
+        return_content: yes
+      changed_when: false
+      register: vpc_cidr
+
+
+
+    # -- A NAT instance always handles the traffic for the next subnet cidr block in the VPC
+    - name: get private subnet cidr block
+      set_fact:
+        private_subnet_cidr: "{{ lookup('file', '/tmp/private_subnet_cidr') }}"
+
+    # -- Set netfilter configuration
+
+    - name: get iptables current rules
+      shell: iptables -t nat -L -n
+      register: iptables_current_rules
+      changed_when: false
+      check_mode: no
+
+    - name: set netfilter configuration
+      shell: iptables -t nat -A POSTROUTING -j MASQUERADE -s {{ private_subnet_cidr }} -d 0.0.0.0/0 -m comment --comment "nat-instance"
+      when: iptables_current_rules.stdout.find("nat-instance") == -1
+      register: iptables_rules
+
+    - name: save netfilter configuration
+      shell: iptables-save > /etc/iptables/rules.v4
+      when: iptables_rules.changed
+
